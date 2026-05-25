@@ -25,6 +25,10 @@ RUN mkdir -p /out \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 
+LABEL org.opencontainers.image.source="https://github.com/henrycunh/rinha26-rust"
+LABEL org.opencontainers.image.description="Rust backend for Rinha de Backend 2026"
+LABEL org.opencontainers.image.licenses="MIT"
+
 WORKDIR /app
 COPY --from=builder /build/target/release/rinha-fraud /app/rinha-fraud
 COPY --from=builder /out/references.ridx /app/references.ridx
