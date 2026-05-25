@@ -1,26 +1,37 @@
 services:
   api1: &api
-    build: .
+    build:
+      context: .
     image: rinha-fraud:local
+    platform: linux/amd64
     hostname: api1
+    network_mode: "none"
+    cpuset: "0"
     environment:
       PORT: "8080"
-      INDEX_PATH: /app/references.ridx
-      INDEX_MMAP: "${INDEX_MMAP:-0}"
-      FAST_SEARCH_POINTS: "${FAST_SEARCH_POINTS:-70000}"
-      REPAIR_SEARCH_POINTS: "${REPAIR_SEARCH_POINTS:-500000}"
-      REPAIR_SCORES: "${REPAIR_SCORES:-234}"
-      SCORE5_REPAIR_RULE: "${SCORE5_REPAIR_RULE:-fp70narrow}"
-      IVF_GRID: "${IVF_GRID:-1}"
-      IVF_THRESHOLD: "${IVF_THRESHOLD:-4096}"
-      IVF_DIMS: "${IVF_DIMS:-2,4}"
-      IVF_GLOBAL_PLAN: "${IVF_GLOBAL_PLAN:-1}"
-      AVX2_PREFIX4: "${AVX2_PREFIX4:-0}"
-      AVX2_PREFETCH_POINTS: "${AVX2_PREFETCH_POINTS:-0}"
-      PACKED_HOT2: "${PACKED_HOT2:-0}"
+      API_EPOLL: "${API_EPOLL:-1}"
+      EPOLL_PREALLOC_FDS: "${EPOLL_PREALLOC_FDS:-2048}"
+      EPOLL_PREALLOC_CONTROLS: "${EPOLL_PREALLOC_CONTROLS:-256}"
+      API_DIRECT_FD: "${API_DIRECT_FD:-0}"
+      API_WORKERS: "${API_WORKERS:-192}"
+      TIMER_SLACK_NS: "${TIMER_SLACK_NS:-1}"
+      MLOCK_CURRENT: "${MLOCK_CURRENT:-0}"
+      TCP_BACKLOG: "${TCP_BACKLOG:-8192}"
+      TCP_BUSY_POLL_US: "${TCP_BUSY_POLL_US:-0}"
       FD_SOCKET_DIR: "${FD_SOCKET_DIR:-/sockets}"
     volumes:
       - sockets:/sockets
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
     deploy:
       resources:
         limits:
@@ -30,18 +41,34 @@ services:
   api2:
     <<: *api
     hostname: api2
+    cpuset: "1"
 
   lb:
     image: rinha-fraud:local
+    platform: linux/amd64
+    entrypoint: ["/app/fd-lb"]
     hostname: lb
     environment:
       PORT: "9999"
-      LB_MODE: "fd"
       LB_FD_SOCKETS: "${LB_FD_SOCKETS:-/sockets/api1.sock,/sockets/api2.sock}"
+      MLOCK_CURRENT: "${MLOCK_CURRENT:-0}"
+      TCP_BACKLOG: "${TCP_BACKLOG:-8192}"
+      TCP_QUICKACK: "${TCP_QUICKACK:-1}"
     ports:
       - "127.0.0.1:9999:9999"
     volumes:
       - sockets:/sockets
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
     depends_on:
       - api1
       - api2

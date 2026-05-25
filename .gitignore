@@ -7,10 +7,7 @@
 !.env.example
 
 # generated challenge resources
-/resources/*.ridx
-/resources/*.json
-/resources/*.json.gz
-/resources/*.gz
+/resources/
 
 # benchmark output
 /results/
