@@ -1,6 +1,0 @@
-target
-.git
-resources/*.ridx
-resources/*.json
-resources/*.gz
-

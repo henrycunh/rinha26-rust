@@ -1,45 +1,44 @@
 services:
   api1: &api
-    build: .
-    image: rinha-fraud:local
+    image: ghcr.io/henrycunh/rinha26-rust:5dc7c88
     hostname: api1
     environment:
       PORT: "8080"
       INDEX_PATH: /app/references.ridx
-      INDEX_MMAP: "${INDEX_MMAP:-0}"
-      FAST_SEARCH_POINTS: "${FAST_SEARCH_POINTS:-70000}"
-      REPAIR_SEARCH_POINTS: "${REPAIR_SEARCH_POINTS:-500000}"
-      REPAIR_SCORES: "${REPAIR_SCORES:-234}"
-      SCORE5_REPAIR_RULE: "${SCORE5_REPAIR_RULE:-fp70narrow}"
-      IVF_GRID: "${IVF_GRID:-1}"
-      IVF_THRESHOLD: "${IVF_THRESHOLD:-4096}"
-      IVF_DIMS: "${IVF_DIMS:-2,4}"
-      IVF_GLOBAL_PLAN: "${IVF_GLOBAL_PLAN:-1}"
-      AVX2_PREFIX4: "${AVX2_PREFIX4:-0}"
-      AVX2_PREFETCH_POINTS: "${AVX2_PREFETCH_POINTS:-0}"
-      PACKED_HOT2: "${PACKED_HOT2:-0}"
-      FD_SOCKET_DIR: "${FD_SOCKET_DIR:-/sockets}"
+      INDEX_MMAP: "0"
+      FAST_SEARCH_POINTS: "70000"
+      REPAIR_SEARCH_POINTS: "500000"
+      REPAIR_SCORES: "234"
+      SCORE5_REPAIR_RULE: fp70narrow
+      IVF_GRID: "1"
+      IVF_THRESHOLD: "4096"
+      IVF_DIMS: "2,4"
+      IVF_GLOBAL_PLAN: "1"
+      AVX2_PREFIX4: "0"
+      AVX2_PREFETCH_POINTS: "0"
+      PACKED_HOT2: "0"
+      FD_SOCKET_DIR: /sockets
     volumes:
       - sockets:/sockets
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.45}"
-          memory: "${API_MEMORY:-160MB}"
+          cpus: "0.45"
+          memory: "160MB"
 
   api2:
     <<: *api
     hostname: api2
 
   lb:
-    image: rinha-fraud:local
+    image: ghcr.io/henrycunh/rinha26-rust:5dc7c88
     hostname: lb
     environment:
       PORT: "9999"
-      LB_MODE: "fd"
-      LB_FD_SOCKETS: "${LB_FD_SOCKETS:-/sockets/api1.sock,/sockets/api2.sock}"
+      LB_MODE: fd
+      LB_FD_SOCKETS: /sockets/api1.sock,/sockets/api2.sock
     ports:
-      - "127.0.0.1:9999:9999"
+      - "9999:9999"
     volumes:
       - sockets:/sockets
     depends_on:
@@ -48,8 +47,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${LB_CPUS:-0.10}"
-          memory: "${LB_MEMORY:-30MB}"
+          cpus: "0.10"
+          memory: "30MB"
 
 volumes:
   sockets:
