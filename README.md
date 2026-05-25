@@ -23,11 +23,9 @@ Diagram legend:
 
 | class | use |
 | --- | --- |
-| `actor` | external client |
-| `edge` | ingress or trust boundary |
 | `core` | runtime process or binary |
 | `work` | request parsing and scoring work |
-| `data` | generated model or socket handoff data |
+| `data` | generated model or training data |
 | `endok` / `enderr` | terminal outcome |
 
 ```mermaid
@@ -55,8 +53,6 @@ flowchart TB
   BINARY -->|"copy binary only"| IMAGE
   IMAGE -->|"training data excluded"| READY(["runtime ready"]):::endok
 
-  classDef actor fill:#111111,color:#ffffff,stroke:#111111,stroke-width:1px
-  classDef edge fill:#ffffff,color:#111111,stroke:#111111,stroke-width:1px
   classDef core fill:#ececec,color:#111111,stroke:#8f8f8f,stroke-width:1px
   classDef work fill:#dfe9ff,color:#13315c,stroke:#5b7bbf,stroke-width:1px
   classDef data fill:#dff3e3,color:#0f4d23,stroke:#5da776,stroke-width:1px
@@ -75,47 +71,45 @@ flowchart TB
 | response | Return one of two prebuilt HTTP responses. | `HTTP_SCORE0`, `HTTP_SCORE5` |
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif", "primaryColor": "#ffffff", "primaryTextColor": "#111111", "primaryBorderColor": "#111111", "lineColor": "#444444", "textColor": "#111111", "secondaryColor": "#f6f6f6", "tertiaryColor": "#f6f6f6", "clusterBkg": "#f6f6f6", "clusterBorder": "#cfcfcf"}}}%%
-flowchart LR
-  subgraph CLIENT["client"]
-    C["k6 / tester"]:::actor
-  end
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif", "primaryColor": "#ffffff", "primaryTextColor": "#111111", "primaryBorderColor": "#111111", "lineColor": "#444444", "textColor": "#111111"}}}%%
+stateDiagram-v2
+  direction TB
 
-  subgraph LB["load balancer"]
-    L["fd load balancer"]:::edge
-    FD["accepted client fd"]:::core
-  end
+  state "accept TCP :9999" as AcceptTcp
+  state "handoff client fd" as HandoffFd
+  state "epoll loop" as EpollLoop
+  state "scan request body" as ScanBody
+  state "fill features lazily" as FillFeatures
+  state "walk packed tree" as WalkTree
+  state "200 ok" as Ready
+  state "404" as NotFound
+  state "approve score 0" as Approve
+  state "deny score 5" as Deny
 
-  subgraph API["api worker"]
-    UDS["Unix control socket"]:::data
-    EPOLL["epoll request loop"]:::core
-    PARSER["body field scanner"]:::work
-    FEATURES["lazy feature fill"]:::work
-    TREE["packed decision tree"]:::work
-    DECISION{"fraud?"}:::work
-  end
+  [*] --> AcceptTcp: client request
+  AcceptTcp --> HandoffFd: accept(2) + SCM_RIGHTS
+  HandoffFd --> EpollLoop: API receives fd
+  EpollLoop --> Ready: GET /ready
+  EpollLoop --> ScanBody: POST /fraud-score
+  EpollLoop --> NotFound: other route
+  ScanBody --> FillFeatures: parsed
+  ScanBody --> Approve: parse miss
+  FillFeatures --> WalkTree: on-demand fields
+  WalkTree --> Approve: legit leaf
+  WalkTree --> Deny: fraud leaf
+  Ready --> [*]
+  NotFound --> [*]
+  Approve --> [*]
+  Deny --> [*]
 
-  C -->|"HTTP :9999"| L
-  L -->|"accept(2)"| FD
-  FD -->|"SCM_RIGHTS"| UDS
-  UDS -->|"fd handoff"| EPOLL
-  EPOLL -->|"GET /ready"| OK(["200 ok"]):::endok
-  EPOLL -->|"POST /fraud-score"| PARSER
-  EPOLL -->|"other route"| MISS(["404"]):::enderr
-  PARSER -->|"parsed"| FEATURES
-  PARSER -->|"parse miss"| DEFAULT(["approve score 0"]):::endok
-  FEATURES -->|"on-demand fields"| TREE
-  TREE -->|"leaf reached"| DECISION
-  DECISION -->|"yes"| DENY(["deny score 5"]):::endok
-  DECISION -->|"no"| APPROVE(["approve score 0"]):::endok
-
-  classDef actor fill:#111111,color:#ffffff,stroke:#111111,stroke-width:1px
-  classDef edge fill:#ffffff,color:#111111,stroke:#111111,stroke-width:1px
   classDef core fill:#ececec,color:#111111,stroke:#8f8f8f,stroke-width:1px
   classDef work fill:#dfe9ff,color:#13315c,stroke:#5b7bbf,stroke-width:1px
-  classDef data fill:#dff3e3,color:#0f4d23,stroke:#5da776,stroke-width:1px
   classDef endok fill:#c8f2d2,color:#0f4d23,stroke:#3f8f5b,stroke-width:1px
   classDef enderr fill:#ffd9d9,color:#5e1717,stroke:#b65b5b,stroke-width:1px
+  class AcceptTcp,HandoffFd,EpollLoop core
+  class ScanBody,FillFeatures,WalkTree work
+  class Ready,Approve,Deny endok
+  class NotFound enderr
 ```
 
 The load balancer does not inspect requests and does not score fraud. Its only job is accepting client sockets and distributing those already-accepted file descriptors between the two API containers. After the transfer, the API talks directly to the client socket.
