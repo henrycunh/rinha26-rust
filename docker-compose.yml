@@ -1,25 +1,35 @@
 services:
   api1: &api
-    image: ghcr.io/henrycunh/rinha26-rust:5dc7c88
+    image: ghcr.io/henrycunh/rinha26-rust:e664025
+    platform: linux/amd64
     hostname: api1
+    network_mode: "none"
+    cpuset: "0"
     environment:
       PORT: "8080"
-      INDEX_PATH: /app/references.ridx
-      INDEX_MMAP: "0"
-      FAST_SEARCH_POINTS: "70000"
-      REPAIR_SEARCH_POINTS: "500000"
-      REPAIR_SCORES: "234"
-      SCORE5_REPAIR_RULE: fp70narrow
-      IVF_GRID: "1"
-      IVF_THRESHOLD: "4096"
-      IVF_DIMS: "2,4"
-      IVF_GLOBAL_PLAN: "1"
-      AVX2_PREFIX4: "0"
-      AVX2_PREFETCH_POINTS: "0"
-      PACKED_HOT2: "0"
+      API_EPOLL: "1"
+      EPOLL_PREALLOC_FDS: "2048"
+      EPOLL_PREALLOC_CONTROLS: "256"
+      API_DIRECT_FD: "0"
+      API_WORKERS: "192"
+      TIMER_SLACK_NS: "1"
+      MLOCK_CURRENT: "0"
+      TCP_BACKLOG: "8192"
+      TCP_BUSY_POLL_US: "0"
       FD_SOCKET_DIR: /sockets
     volumes:
       - sockets:/sockets
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
     deploy:
       resources:
         limits:
@@ -29,18 +39,34 @@ services:
   api2:
     <<: *api
     hostname: api2
+    cpuset: "1"
 
   lb:
-    image: ghcr.io/henrycunh/rinha26-rust:5dc7c88
+    image: ghcr.io/henrycunh/rinha26-rust:e664025
+    platform: linux/amd64
+    entrypoint: ["/app/fd-lb"]
     hostname: lb
     environment:
       PORT: "9999"
-      LB_MODE: fd
       LB_FD_SOCKETS: /sockets/api1.sock,/sockets/api2.sock
+      MLOCK_CURRENT: "0"
+      TCP_BACKLOG: "8192"
+      TCP_QUICKACK: "1"
     ports:
       - "9999:9999"
     volumes:
       - sockets:/sockets
+    security_opt:
+      - seccomp=unconfined
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
     depends_on:
       - api1
       - api2
