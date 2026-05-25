@@ -66,13 +66,13 @@ flowchart TB
 
 ### architecture
 
-| stage | hot-path work | implementation |
+| stage | hot-path work | key calls |
 | --- | --- | --- |
-| client to LB | TCP arrives on `:9999`; the LB accepts the socket and chooses an API. | <pre><code class="language-c">accept4(server_fd, NULL, NULL, SOCK_CLOEXEC \| SOCK_NONBLOCK);<br>sendmsg(upstream_fd, &msg, MSG_NOSIGNAL);</code></pre> |
-| LB to API | The accepted client socket is passed with `SCM_RIGHTS` over a Unix control socket. | <pre><code class="language-c">cmsg->cmsg_level = SOL_SOCKET;<br>cmsg->cmsg_type = SCM_RIGHTS;</code></pre> |
-| API parser | The API reads one HTTP message and scans only the JSON fields used by the model. | <pre><code class="language-rust">let fields = parse_fast_fields(body)?;<br>features[0].write(clamp_upper1(fields.amount / 10_000.0));</code></pre> |
-| decision tree | Features are filled lazily while the generated tree walks thresholds. | <pre><code class="language-rust">let node = unsafe { NODES.get_unchecked(index) };<br>index = if feature <= node.threshold { node.left() } else { node.right() };</code></pre> |
-| response | The endpoint returns one of two prebuilt HTTP responses. | <pre><code class="language-rust">Some(if fraud { 5 } else { 0 })</code></pre> |
+| client to LB | Accept TCP on `:9999` and choose an API. | `accept4`, `sendmsg` |
+| LB to API | Pass the accepted client socket over a Unix control socket. | `SCM_RIGHTS` |
+| API parser | Read one HTTP message and scan only model fields. | `parse_fast_fields` |
+| decision tree | Fill features lazily while walking generated thresholds. | `predict_with_lazy_features` |
+| response | Return one of two prebuilt HTTP responses. | `HTTP_SCORE0`, `HTTP_SCORE5` |
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif", "primaryColor": "#ffffff", "primaryTextColor": "#111111", "primaryBorderColor": "#111111", "lineColor": "#444444", "textColor": "#111111", "secondaryColor": "#f6f6f6", "tertiaryColor": "#f6f6f6", "clusterBkg": "#f6f6f6", "clusterBorder": "#cfcfcf"}}}%%
