@@ -1,0 +1,21 @@
+# rust build output
+/target/
+
+# local environment
+.env
+.env.*
+!.env.example
+
+# generated challenge resources
+/resources/*.ridx
+/resources/*.json
+/resources/*.json.gz
+/resources/*.gz
+
+# benchmark output
+/results/
+*.results.json
+*.k6.log
+
+# macos
+.DS_Store

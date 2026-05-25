@@ -1,0 +1,7 @@
+{
+  "participants": ["Henrique Cunha"],
+  "social": ["https://github.com/henriquecunha"],
+  "source-code-repo": "https://github.com/henrycunh/rinha26-rust",
+  "stack": ["rust", "custom tcp load balancer"],
+  "open_to_work": false
+}
