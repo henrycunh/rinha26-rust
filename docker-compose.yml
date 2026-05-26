@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: ghcr.io/henrycunh/rinha26-rust:5819e30
+    image: ghcr.io/henrycunh/rinha26-rust:22c2b8e
     platform: linux/amd64
     hostname: api1
     network_mode: "none"
@@ -17,6 +17,7 @@ services:
       TCP_BACKLOG: "8192"
       TCP_BUSY_POLL_US: "0"
       FD_SOCKET_DIR: /sockets
+      FD_DGRAM: "0"
     volumes:
       - sockets:/sockets
     security_opt:
@@ -42,17 +43,19 @@ services:
     cpuset: "1"
 
   lb:
-    image: ghcr.io/henrycunh/rinha26-rust:5819e30
+    image: ghcr.io/henrycunh/rinha26-rust:22c2b8e
     platform: linux/amd64
     entrypoint: ["/app/fd-lb"]
     hostname: lb
     environment:
       PORT: "9999"
-      LB_FD_SOCKETS: /sockets/api1.sock,/sockets/api2.sock
+      LB_FD_SOCKETS: /sockets/api1.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api2.sock
       MLOCK_CURRENT: "0"
       TCP_BACKLOG: "8192"
       TCP_QUICKACK: "1"
-      LB_WORKERS: "4"
+      LB_WORKERS: "1"
+      LB_DGRAM: "0"
+      LB_DGRAM_CONNECT: "0"
     ports:
       - "9999:9999"
     volumes:
