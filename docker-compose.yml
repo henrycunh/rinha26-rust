@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: ghcr.io/henrycunh/rinha26-rust:22c2b8e
+    image: ghcr.io/henrycunh/rinha26-rust:219ec43
     platform: linux/amd64
     hostname: api1
     network_mode: "none"
@@ -34,7 +34,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.40"
           memory: "160MB"
 
   api2:
@@ -43,13 +43,13 @@ services:
     cpuset: "1"
 
   lb:
-    image: ghcr.io/henrycunh/rinha26-rust:22c2b8e
+    image: ghcr.io/henrycunh/rinha26-rust:219ec43
     platform: linux/amd64
     entrypoint: ["/app/fd-lb"]
     hostname: lb
     environment:
       PORT: "9999"
-      LB_FD_SOCKETS: /sockets/api1.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api2.sock
+      LB_FD_SOCKETS: /sockets/api1.sock,/sockets/api2.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api1.sock,/sockets/api2.sock
       MLOCK_CURRENT: "0"
       TCP_BACKLOG: "8192"
       TCP_QUICKACK: "1"
@@ -77,7 +77,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: "30MB"
 
 volumes:
