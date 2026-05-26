@@ -19,6 +19,7 @@ services:
       TCP_BACKLOG: "${TCP_BACKLOG:-8192}"
       TCP_BUSY_POLL_US: "${TCP_BUSY_POLL_US:-0}"
       FD_SOCKET_DIR: "${FD_SOCKET_DIR:-/sockets}"
+      FD_DGRAM: "${FD_DGRAM:-0}"
     volumes:
       - sockets:/sockets
     security_opt:
@@ -50,11 +51,13 @@ services:
     hostname: lb
     environment:
       PORT: "9999"
-      LB_FD_SOCKETS: "${LB_FD_SOCKETS:-/sockets/api1.sock,/sockets/api2.sock}"
+      LB_FD_SOCKETS: "${LB_FD_SOCKETS:-/sockets/api1.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api2.sock}"
       MLOCK_CURRENT: "${MLOCK_CURRENT:-0}"
       TCP_BACKLOG: "${TCP_BACKLOG:-8192}"
       TCP_QUICKACK: "${TCP_QUICKACK:-1}"
-      LB_WORKERS: "${LB_WORKERS:-4}"
+      LB_WORKERS: "${LB_WORKERS:-1}"
+      LB_DGRAM: "${LB_DGRAM:-0}"
+      LB_DGRAM_CONNECT: "${LB_DGRAM_CONNECT:-0}"
     ports:
       - "127.0.0.1:9999:9999"
     volumes:

@@ -231,6 +231,11 @@ fn run_fd_api(socket_path: &str) {
     }
     let _ = std::fs::remove_file(path);
 
+    if fd_dgram_default() {
+        run_fd_api_dgram(socket_path);
+        return;
+    }
+
     let listener = UnixListener::bind(path).expect("failed to bind fd socket");
     eprintln!("fd api listening on unix:{socket_path}");
 
@@ -268,9 +273,111 @@ fn api_direct_fd_default() -> bool {
     parse_env_bool("API_DIRECT_FD", false)
 }
 
+fn fd_dgram_default() -> bool {
+    parse_env_bool("FD_DGRAM", false)
+}
+
 #[cfg(target_os = "linux")]
 fn api_epoll_default() -> bool {
     parse_env_bool("API_EPOLL", true)
+}
+
+#[cfg(target_os = "linux")]
+fn run_fd_api_dgram(socket_path: &str) {
+    let socket_fd = create_unix_dgram_socket(socket_path).expect("failed to bind fd dgram socket");
+    eprintln!("fd api dgram mode enabled on unix:{socket_path}");
+
+    if api_epoll_default() {
+        run_fd_api_dgram_epoll(socket_fd);
+        return;
+    }
+
+    loop {
+        match recv_fd_dgram(socket_fd) {
+            FdRecvResult::Fd(fd) => handle_fd_once(fd),
+            FdRecvResult::WouldBlock => std::thread::yield_now(),
+            FdRecvResult::Closed => {}
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_fd_api_dgram(_socket_path: &str) {
+    panic!("fd dgram mode is only supported on linux");
+}
+
+#[cfg(target_os = "linux")]
+fn create_unix_dgram_socket(socket_path: &str) -> io::Result<RawFd> {
+    create_bound_unix_socket(
+        socket_path,
+        libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        false,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn create_bound_unix_socket(
+    socket_path: &str,
+    socket_type: libc::c_int,
+    listen: bool,
+) -> io::Result<RawFd> {
+    let fd = unsafe { libc::socket(libc::AF_UNIX, socket_type, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let bind_result = (|| {
+        unsafe {
+            let buffer_bytes: libc::c_int = 16 * 1024 * 1024;
+            let _ = set_sockopt_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, buffer_bytes);
+        }
+
+        let bytes = socket_path.as_bytes();
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        if bytes.len() >= addr.sun_path.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket path too long",
+            ));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                addr.sun_path.as_mut_ptr().cast::<u8>(),
+                bytes.len(),
+            );
+        }
+
+        let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+        let rc = unsafe { libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) };
+        if rc < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if listen {
+            set_nonblocking_fd(fd)?;
+            let backlog = parse_env_i32("TCP_BACKLOG", DEFAULT_TCP_BACKLOG).max(128);
+            let rc = unsafe { libc::listen(fd, backlog) };
+            if rc < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        let c_path = std::ffi::CString::new(socket_path)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains nul"))?;
+        unsafe {
+            let _ = libc::chmod(c_path.as_ptr(), 0o666);
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = bind_result {
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(error);
+    }
+    Ok(fd)
 }
 
 fn run_fd_api_direct(listener: UnixListener) {
@@ -296,6 +403,11 @@ fn run_fd_api_epoll(listener: UnixListener) {
 
     let listener_fd = listener.as_raw_fd();
     set_nonblocking_fd(listener_fd).expect("failed to set fd listener nonblocking");
+    run_fd_api_epoll_fd(listener_fd);
+}
+
+#[cfg(target_os = "linux")]
+fn run_fd_api_epoll_fd(listener_fd: RawFd) {
     let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epfd < 0 {
         panic!("failed to create epoll: {}", io::Error::last_os_error());
@@ -343,6 +455,109 @@ fn run_fd_api_epoll(listener: UnixListener) {
                 let generation = (token >> 32) as u32;
                 handle_epoll_client_event(fd, generation, event.events, epfd, &mut conns);
             }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_fd_api_dgram_epoll(socket_fd: RawFd) {
+    let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+    if epfd < 0 {
+        panic!("failed to create epoll: {}", io::Error::last_os_error());
+    }
+
+    epoll_add(
+        epfd,
+        socket_fd,
+        EPOLL_LISTENER_TOKEN,
+        (libc::EPOLLIN | libc::EPOLLRDHUP) as u32,
+    )
+    .expect("failed to add fd dgram socket to epoll");
+
+    let mut conns: Vec<Option<Box<EpollConn>>> = Vec::new();
+    conns.resize_with(EPOLL_MAX_FDS, || None);
+    prealloc_epoll_conns(&mut conns);
+    let mut events = vec![libc::epoll_event { events: 0, u64: 0 }; EPOLL_MAX_EVENTS];
+    lock_current_memory();
+
+    loop {
+        let ready =
+            unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), EPOLL_MAX_EVENTS as i32, -1) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            panic!("epoll_wait failed: {error}");
+        }
+
+        for event in events.iter().take(ready as usize) {
+            let token = event.u64;
+            if token == EPOLL_LISTENER_TOKEN {
+                drain_epoll_dgram(socket_fd, epfd, &mut conns);
+            } else {
+                let fd = (token & EPOLL_CLIENT_FD_MASK) as RawFd;
+                let generation = (token >> 32) as u32;
+                handle_epoll_client_event(fd, generation, event.events, epfd, &mut conns);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn drain_epoll_dgram(socket_fd: RawFd, epfd: RawFd, conns: &mut [Option<Box<EpollConn>>]) {
+    loop {
+        match recv_fd_dgram(socket_fd) {
+            FdRecvResult::Fd(client_fd) => register_epoll_client(client_fd, epfd, conns),
+            FdRecvResult::WouldBlock => return,
+            FdRecvResult::Closed => return,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn recv_fd_dgram(socket_fd: RawFd) -> FdRecvResult {
+    let mut byte = MaybeUninit::<u8>::uninit();
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: 1,
+    };
+    let mut control = [MaybeUninit::<u8>::uninit(); SCM_RIGHTS_CONTROL_BYTES];
+    let mut msg = libc::msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iov,
+        msg_iovlen: 1,
+        msg_control: control.as_mut_ptr().cast(),
+        msg_controllen: std::mem::size_of_val(&control) as _,
+        msg_flags: 0,
+    };
+
+    loop {
+        let received = unsafe { libc::recvmsg(socket_fd, &mut msg, libc::MSG_DONTWAIT) };
+        if received > 0 {
+            break;
+        }
+        if received == 0 {
+            return FdRecvResult::Closed;
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => return FdRecvResult::WouldBlock,
+            _ => return FdRecvResult::Closed,
+        }
+    }
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if !cmsg.is_null()
+            && (*cmsg).cmsg_level == libc::SOL_SOCKET
+            && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+        {
+            FdRecvResult::Fd(*(libc::CMSG_DATA(cmsg) as *const RawFd))
+        } else {
+            FdRecvResult::Closed
         }
     }
 }
@@ -1334,6 +1549,7 @@ fn tune_tcp_stream(stream: &TcpStream) {
 #[cfg(target_os = "linux")]
 fn tune_tcp_fd(fd: RawFd) {
     unsafe {
+        let _ = set_sockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
         let _ = set_sockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, 1);
 
         let busy_poll = parse_env_i32("TCP_BUSY_POLL_US", 50).max(0);

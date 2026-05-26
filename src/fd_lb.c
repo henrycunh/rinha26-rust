@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,6 +30,8 @@
 
 typedef struct {
     char path[108];
+    struct sockaddr_un addr;
+    socklen_t addr_len;
     int fd;
     char byte;
     struct iovec iov;
@@ -47,6 +50,8 @@ static uint32_t rr_mask = 0;
 static int backlog = BACKLOG;
 static int quickack = 0;
 static int worker_count = 4;
+static int dgram_mode = 0;
+static int dgram_connected = 0;
 
 static int env_enabled(const char* name, int default_value) {
     const char* value = getenv(name);
@@ -110,11 +115,20 @@ static inline int upstream_index(uint32_t value) {
 }
 
 static void init_upstream_msg(upstream_t* u) {
+    memset(&u->addr, 0, sizeof(u->addr));
+    u->addr.sun_family = AF_UNIX;
+    strncpy(u->addr.sun_path, u->path, sizeof(u->addr.sun_path) - 1);
+    u->addr_len = (socklen_t)(sizeof(sa_family_t) + strlen(u->path) + 1);
+
     u->byte = 1;
     u->iov.iov_base = &u->byte;
     u->iov.iov_len = 1;
     u->msg.msg_iov = &u->iov;
     u->msg.msg_iovlen = 1;
+    if (dgram_mode && !dgram_connected) {
+        u->msg.msg_name = &u->addr;
+        u->msg.msg_namelen = u->addr_len;
+    }
     u->msg.msg_control = u->control.buf;
     u->msg.msg_controllen = CMSG_SPACE(sizeof(int));
 
@@ -127,8 +141,33 @@ static void init_upstream_msg(upstream_t* u) {
 }
 
 static int connect_once(const char* path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int socket_type = SOCK_STREAM;
+    if (dgram_mode) {
+        socket_type = SOCK_DGRAM | SOCK_NONBLOCK;
+    }
+    int fd = socket(AF_UNIX,
+                    socket_type | SOCK_CLOEXEC,
+                    0);
     if (UNLIKELY(fd < 0)) return -1;
+
+    if (dgram_mode) {
+        int sndbuf = 16 * 1024 * 1024;
+        (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+        socklen_t addr_len = (socklen_t)(sizeof(sa_family_t) + strlen(path) + 1);
+        if (dgram_connected && connect(fd, (struct sockaddr*)&addr, addr_len) != 0) {
+            close(fd);
+            return -1;
+        }
+        if (!dgram_connected && access(path, F_OK) != 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
+    }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -173,10 +212,17 @@ static int reconnect_one(int idx) {
 static inline int send_fd_once(upstream_t* upstream, int client_fd) {
     *upstream->fd_slot = client_fd;
 
+    int spins = dgram_mode ? 4096 : 1;
     for (;;) {
         ssize_t sent = sendmsg(upstream->fd, &upstream->msg, MSG_NOSIGNAL);
         if (LIKELY(sent == 1)) return 0;
         if (UNLIKELY(sent < 0 && errno == EINTR)) continue;
+        if (UNLIKELY(
+                sent < 0 && dgram_mode && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+                --spins > 0)) {
+            sched_yield();
+            continue;
+        }
         return -1;
     }
 }
@@ -248,6 +294,8 @@ int main(void) {
     if (UNLIKELY(backlog_env != NULL && backlog_env[0] != '\0')) backlog = atoi(backlog_env);
     if (UNLIKELY(backlog < 128)) backlog = 128;
     quickack = env_enabled("TCP_QUICKACK", 1);
+    dgram_mode = env_enabled("LB_DGRAM", 0);
+    dgram_connected = env_enabled("LB_DGRAM_CONNECT", 0);
     const char* workers_env = getenv("LB_WORKERS");
     if (UNLIKELY(workers_env != NULL && workers_env[0] != '\0')) worker_count = atoi(workers_env);
     if (UNLIKELY(worker_count < 1)) worker_count = 1;
