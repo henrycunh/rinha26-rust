@@ -46,6 +46,7 @@ static uint32_t rr_next = 0;
 static uint32_t rr_mask = 0;
 static int backlog = BACKLOG;
 static int quickack = 0;
+static int worker_count = 4;
 
 static int env_enabled(const char* name, int default_value) {
     const char* value = getenv(name);
@@ -214,27 +215,7 @@ static inline void tune_client_fd(int fd) {
     }
 }
 
-int main(void) {
-    signal(SIGPIPE, SIG_IGN);
-    lock_current_memory();
-    parse_upstreams();
-    connect_all();
-
-    int port = 9999;
-    const char* port_env = getenv("PORT");
-    if (UNLIKELY(port_env != NULL && port_env[0] != '\0')) port = atoi(port_env);
-
-    const char* backlog_env = getenv("TCP_BACKLOG");
-    if (UNLIKELY(backlog_env != NULL && backlog_env[0] != '\0')) backlog = atoi(backlog_env);
-    if (UNLIKELY(backlog < 128)) backlog = 128;
-    quickack = env_enabled("TCP_QUICKACK", 1);
-
-    int server_fd = listen_tcp(port);
-    if (UNLIKELY(server_fd < 0)) {
-        perror("listen");
-        return 1;
-    }
-
+static void serve_loop(int server_fd) {
     for (;;) {
         int client_fd = accept4(server_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
         if (UNLIKELY(client_fd < 0)) {
@@ -253,4 +234,47 @@ int main(void) {
         }
         close(client_fd);
     }
+}
+
+int main(void) {
+    signal(SIGPIPE, SIG_IGN);
+    parse_upstreams();
+
+    int port = 9999;
+    const char* port_env = getenv("PORT");
+    if (UNLIKELY(port_env != NULL && port_env[0] != '\0')) port = atoi(port_env);
+
+    const char* backlog_env = getenv("TCP_BACKLOG");
+    if (UNLIKELY(backlog_env != NULL && backlog_env[0] != '\0')) backlog = atoi(backlog_env);
+    if (UNLIKELY(backlog < 128)) backlog = 128;
+    quickack = env_enabled("TCP_QUICKACK", 1);
+    const char* workers_env = getenv("LB_WORKERS");
+    if (UNLIKELY(workers_env != NULL && workers_env[0] != '\0')) worker_count = atoi(workers_env);
+    if (UNLIKELY(worker_count < 1)) worker_count = 1;
+    if (UNLIKELY(worker_count > MAX_UPSTREAMS)) worker_count = MAX_UPSTREAMS;
+
+    int server_fd = listen_tcp(port);
+    if (UNLIKELY(server_fd < 0)) {
+        perror("listen");
+        return 1;
+    }
+
+    int worker_id = 0;
+    for (int worker = 1; worker < worker_count; ++worker) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            worker_id = worker;
+            break;
+        }
+        if (UNLIKELY(pid < 0)) {
+            worker_count = worker;
+            break;
+        }
+    }
+    rr_next = (uint32_t)worker_id;
+    connect_all();
+    lock_current_memory();
+
+    serve_loop(server_fd);
+    return 0;
 }

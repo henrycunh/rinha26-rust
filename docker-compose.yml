@@ -54,6 +54,7 @@ services:
       MLOCK_CURRENT: "${MLOCK_CURRENT:-0}"
       TCP_BACKLOG: "${TCP_BACKLOG:-8192}"
       TCP_QUICKACK: "${TCP_QUICKACK:-1}"
+      LB_WORKERS: "${LB_WORKERS:-4}"
     ports:
       - "127.0.0.1:9999:9999"
     volumes:

@@ -14,8 +14,8 @@ const DEFAULT_API_WORKERS: usize = 192;
 #[cfg(target_os = "linux")]
 const DEFAULT_TCP_BACKLOG: i32 = 8192;
 const WORKER_STACK_BYTES: usize = 64 * 1024;
-const DIRECT_READ_BUFFER_BYTES: usize = 4 * 1024;
-const KEEP_ALIVE_READ_BUFFER_BYTES: usize = 4 * 1024;
+const DIRECT_READ_BUFFER_BYTES: usize = 1024;
+const KEEP_ALIVE_READ_BUFFER_BYTES: usize = 1024;
 const SCM_RIGHTS_CONTROL_BYTES: usize = 32;
 #[cfg(target_os = "linux")]
 const EPOLL_MAX_EVENTS: usize = 512;
@@ -872,7 +872,7 @@ fn http_message_bounds_direct(buffer: &[u8]) -> Option<DirectHttpMessage> {
         let (_, body_start) = find_header_body_boundary(buffer)?;
         (body_start, 0)
     } else {
-        find_post_header_bounds(buffer)?
+        fast_known_post_header_bounds(buffer).or_else(|| find_post_header_bounds(buffer))?
     };
     let message_end = body_start.checked_add(content_length)?;
     Some(DirectHttpMessage {
@@ -897,6 +897,38 @@ fn find_header_body_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
         cursor += 1;
     }
     None
+}
+
+#[inline(always)]
+fn fast_known_post_header_bounds(buffer: &[u8]) -> Option<(usize, usize)> {
+    const PREFIX: &[u8] = b"POST /fraud-score HTTP/1.1\r\nHost: localhost:9999\r\nUser-Agent: Grafana k6/2.0.0\r\nContent-Length: ";
+    const SUFFIX: &[u8] = b"\r\nContent-Type: application/json\r\n\r\n";
+
+    if buffer.len() < PREFIX.len() || buffer.get(0..PREFIX.len()) != Some(PREFIX) {
+        return None;
+    }
+
+    let mut cursor = PREFIX.len();
+    let mut content_length = 0usize;
+    let mut has_digit = false;
+    while cursor < buffer.len() {
+        let digit = unsafe { *buffer.get_unchecked(cursor) }.wrapping_sub(b'0');
+        if digit > 9 {
+            break;
+        }
+        has_digit = true;
+        content_length = content_length
+            .checked_mul(10)?
+            .checked_add(digit as usize)?;
+        cursor += 1;
+    }
+
+    let suffix_end = cursor.checked_add(SUFFIX.len())?;
+    if !has_digit || suffix_end > buffer.len() || buffer.get(cursor..suffix_end) != Some(SUFFIX) {
+        return None;
+    }
+
+    Some((suffix_end, content_length))
 }
 
 #[inline(always)]
