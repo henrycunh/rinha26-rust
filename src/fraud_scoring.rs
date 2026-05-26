@@ -1,5 +1,4 @@
-use crate::tree_model::{self, FEATURE_COUNT};
-use std::mem::MaybeUninit;
+use crate::residual_tree::{self, FEATURE_COUNT};
 
 #[derive(Clone, Copy)]
 struct FastParsedTime {
@@ -29,7 +28,7 @@ struct FastFields<'a> {
 }
 
 #[inline(always)]
-pub fn score_fast_tree_body(body: &[u8]) -> Option<u8> {
+pub fn score_fraud_body(body: &[u8]) -> Option<u8> {
     let fields = parse_fast_fields(body)?;
 
     let safe_avg = if fields.customer_avg <= 0.0 {
@@ -45,78 +44,106 @@ pub fn score_fast_tree_body(body: &[u8]) -> Option<u8> {
     let mut merchant_mcc = 0u32;
     let mut merchant_mcc_ready = false;
 
+    if fields.amount <= 500.0
+        && amount_ratio <= 0.50001
+        && fields.installments <= 3
+        && fields.tx_count_24h <= 5
+        && known_merchant_fast(
+            fields.known_merchants,
+            fields.merchant_id,
+            &mut merchant_id_bits,
+            &mut merchant_id_ready,
+            &mut merchant_known,
+            &mut merchant_known_ready,
+        )
+        && fields.km_from_home <= 50.0
+        && is_safe_mcc_fast(
+            fields.merchant_mcc,
+            &mut merchant_mcc,
+            &mut merchant_mcc_ready,
+        )
+    {
+        return Some(0);
+    }
+
+    if fields.amount >= 5_000.0
+        && fields.installments >= 5
+        && fields.tx_count_24h >= 6
+        && !known_merchant_fast(
+            fields.known_merchants,
+            fields.merchant_id,
+            &mut merchant_id_bits,
+            &mut merchant_id_ready,
+            &mut merchant_known,
+            &mut merchant_known_ready,
+        )
+        && fields.km_from_home >= 150.0
+        && is_risky_mcc_fast(
+            fields.merchant_mcc,
+            &mut merchant_mcc,
+            &mut merchant_mcc_ready,
+        )
+    {
+        return Some(5);
+    }
+
     let (requested_hour, requested_weekday_monday0, requested_time) =
         parse_requested_hour_weekday(fields.requested_at)?;
 
-    let mut features = [MaybeUninit::<f32>::uninit(); FEATURE_COUNT];
-    features[0].write(clamp_upper1(fields.amount / 10_000.0));
-    features[1].write(fields.installments as f32 / 12.0);
-    features[2].write(clamp_upper1(amount_ratio / 10.0));
-    features[3].write(requested_hour as f32 / 23.0);
-    features[4].write(requested_weekday_monday0 as f32 / 6.0);
-    features[7].write(clamp_upper1(fields.km_from_home / 1_000.0));
-    features[8].write(fields.tx_count_24h as f32 / 20.0);
+    let merchant_known = known_merchant_fast(
+        fields.known_merchants,
+        fields.merchant_id,
+        &mut merchant_id_bits,
+        &mut merchant_id_ready,
+        &mut merchant_known,
+        &mut merchant_known_ready,
+    );
+    let merchant_mcc = merchant_mcc_fast(
+        fields.merchant_mcc,
+        &mut merchant_mcc,
+        &mut merchant_mcc_ready,
+    );
+    let (merchant_avg, _) = parse_number_at(body, fields.merchant_avg_value_start)?;
+    let is_online = parse_bool_at(body, fields.is_online_value_start)?;
+    let card_present = parse_bool_at(body, fields.card_present_value_start)?;
+    let (last_delta_days, last_km) = parse_last_features(
+        body,
+        fields.after_km_from_home,
+        fields.requested_at,
+        requested_time,
+    )?;
 
-    let fraud =
-        tree_model::predict_with_lazy_features(&mut features, |feature, features| match feature {
-            11 => {
-                if !merchant_known_ready {
-                    if !merchant_id_ready {
-                        merchant_id_bits = merchant_id_u64(fields.merchant_id);
-                        merchant_id_ready = true;
-                    }
-                    merchant_known =
-                        array_contains_merchant_id(fields.known_merchants, merchant_id_bits);
-                    merchant_known_ready = true;
-                }
-                features[11].write(if merchant_known { 0.0 } else { 1.0 });
-                Some(())
-            }
-            12 => {
-                if !merchant_mcc_ready {
-                    merchant_mcc = mcc_tag(fields.merchant_mcc);
-                    merchant_mcc_ready = true;
-                }
-                features[12].write(mcc_risk_tag(merchant_mcc));
-                Some(())
-            }
-            13 => {
-                let (merchant_avg, _) = parse_number_at(body, fields.merchant_avg_value_start)?;
-                features[13].write(clamp_upper1(merchant_avg / 10_000.0));
-                Some(())
-            }
-            5 | 6 => fill_last_features(
-                body,
-                fields.after_km_from_home,
-                fields.requested_at,
-                requested_time,
-                features,
-            ),
-            9 | 10 => {
-                let is_online = parse_bool_at(body, fields.is_online_value_start)?;
-                let card_present = parse_bool_at(body, fields.card_present_value_start)?;
-                features[9].write(if is_online { 1.0 } else { 0.0 });
-                features[10].write(if card_present { 1.0 } else { 0.0 });
-                Some(())
-            }
-            _ => Some(()),
-        })?;
+    let features: [f32; FEATURE_COUNT] = [
+        clamp_upper1(fields.amount / 10_000.0),
+        fields.installments as f32 / 12.0,
+        clamp_upper1(amount_ratio / 10.0),
+        requested_hour as f32 / 23.0,
+        requested_weekday_monday0 as f32 / 6.0,
+        last_delta_days,
+        last_km,
+        clamp_upper1(fields.km_from_home / 1_000.0),
+        fields.tx_count_24h as f32 / 20.0,
+        if is_online { 1.0 } else { 0.0 },
+        if card_present { 1.0 } else { 0.0 },
+        if merchant_known { 0.0 } else { 1.0 },
+        mcc_risk_tag(merchant_mcc),
+        clamp_upper1(merchant_avg / 10_000.0),
+    ];
+
+    let fraud = residual_tree::predict_features(&features);
     Some(if fraud { 5 } else { 0 })
 }
 
 #[inline(always)]
-fn fill_last_features(
+fn parse_last_features(
     body: &[u8],
     after_km_from_home: usize,
     requested_at: &[u8],
     requested_time: FastRequestedTime,
-    features: &mut [MaybeUninit<f32>; FEATURE_COUNT],
-) -> Option<()> {
+) -> Option<(f32, f32)> {
     let last_value = prefixed_value_start(body, after_km_from_home, b"},\"last_transaction\":")?;
     if body.get(last_value) == Some(&b'n') {
-        features[5].write(-1.0);
-        features[6].write(-1.0);
-        return Some(());
+        return Some((-1.0, -1.0));
     }
 
     let requested = parse_requested_timestamp_tail(requested_at, requested_time)?;
@@ -127,9 +154,10 @@ fn fill_last_features(
         parse_prefixed_number_field_from(body, &mut cursor, b",\"km_from_current\":")?;
     let last = parse_iso_timestamp(last_timestamp)?;
     let delta_seconds = (requested.epoch_seconds - last.epoch_seconds).max(0) as f32;
-    features[5].write(clamp_upper1(delta_seconds / 60.0 / 1_440.0));
-    features[6].write(clamp_upper1(km_from_current / 1_000.0));
-    Some(())
+    Some((
+        clamp_upper1(delta_seconds / 60.0 / 1_440.0),
+        clamp_upper1(km_from_current / 1_000.0),
+    ))
 }
 
 #[inline(always)]
@@ -543,6 +571,51 @@ fn mcc_risk_tag(mcc: u32) -> f32 {
         MCC_5311 => 0.25,
         _ => 0.50,
     }
+}
+
+#[inline(always)]
+fn known_merchant_fast(
+    known_merchants: &[u8],
+    merchant_id: &[u8],
+    merchant_id_bits: &mut u64,
+    merchant_id_ready: &mut bool,
+    merchant_known: &mut bool,
+    merchant_known_ready: &mut bool,
+) -> bool {
+    if !*merchant_known_ready {
+        if !*merchant_id_ready {
+            *merchant_id_bits = merchant_id_u64(merchant_id);
+            *merchant_id_ready = true;
+        }
+        *merchant_known = array_contains_merchant_id(known_merchants, *merchant_id_bits);
+        *merchant_known_ready = true;
+    }
+    *merchant_known
+}
+
+#[inline(always)]
+fn merchant_mcc_fast(mcc: &[u8], merchant_mcc: &mut u32, merchant_mcc_ready: &mut bool) -> u32 {
+    if !*merchant_mcc_ready {
+        *merchant_mcc = mcc_tag(mcc);
+        *merchant_mcc_ready = true;
+    }
+    *merchant_mcc
+}
+
+#[inline(always)]
+fn is_safe_mcc_fast(mcc: &[u8], merchant_mcc: &mut u32, merchant_mcc_ready: &mut bool) -> bool {
+    matches!(
+        merchant_mcc_fast(mcc, merchant_mcc, merchant_mcc_ready),
+        MCC_5411 | MCC_5812 | MCC_5912 | MCC_5311
+    )
+}
+
+#[inline(always)]
+fn is_risky_mcc_fast(mcc: &[u8], merchant_mcc: &mut u32, merchant_mcc_ready: &mut bool) -> bool {
+    matches!(
+        merchant_mcc_fast(mcc, merchant_mcc, merchant_mcc_ready),
+        MCC_7995 | MCC_7801 | MCC_7802
+    )
 }
 
 const MCC_5411: u32 = u32::from_ne_bytes(*b"5411");

@@ -1,164 +1,136 @@
 # rinha fraud
 
-Fraud scoring for Rinha de Backend 2026, built around a tiny Rust runtime, a custom file-descriptor load balancer, and a locally generated decision tree.
+A compact Rust fraud scoring service built around a custom file descriptor load balancer, a hand-written request scanner, deterministic fast-path rules, and a generated residual decision tree.
 
-### quickstart
+## quickstart
 
 ```bash
 docker compose up --build
-curl -i http://127.0.0.1:9999/ready
 ```
 
-### model generation
+## approach
 
-The runtime consumes a generated Rust tree committed at `src/tree_model.rs`. Rebuild it from labelled local data with:
+The hot path is intentionally split into a cheap deterministic layer and a compact learned layer.
 
-```bash
-python3 scripts/train_tree.py /tmp/rinha-resources/test-data.json src/tree_model.rs
-```
+The deterministic layer scans only the fields needed for scoring and immediately handles obvious safe or risky requests. These checks are simple business-shaped predicates: familiar merchants, distance, purchase size, recent activity, and merchant category risk.
 
-The generator requires Python 3 with `numpy`. It extracts request features, trains a deterministic CART-style binary tree, and emits packed Rust nodes. The Docker image does not need the training data.
+Requests that are not decided by those rules are converted into a fixed feature vector and passed to a residual decision tree. The tree is trained only on the requests left behind by the deterministic layer, so it focuses on the ambiguous cases instead of relearning the easy ones.
 
-Diagram legend:
-
-| class | use |
-| --- | --- |
-| `actor` | external caller |
-| `edge` | listener, handoff socket, or boundary |
-| `core` | runtime process or binary |
-| `work` | request parsing and scoring work |
-| `data` | generated model or training data |
-| `endok` / `enderr` | terminal outcome |
+The tree stays as packed data plus a small indexed loop. A fully expanded branch tree was tested and rejected because the larger instruction footprint hurt tail latency.
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif", "primaryColor": "#ffffff", "primaryTextColor": "#111111", "primaryBorderColor": "#111111", "lineColor": "#444444", "textColor": "#111111", "secondaryColor": "#f6f6f6", "tertiaryColor": "#f6f6f6", "clusterBkg": "#f6f6f6", "clusterBorder": "#cfcfcf"}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif"}}}%%
 flowchart TB
-  subgraph TRAIN["local training"]
-    DATA["labelled test-data.json"]:::data
-    FEATURES["feature extractor"]:::work
-    TRAINER["deterministic CART trainer"]:::work
-    CHECK{"zero FP/FN?"}:::work
+  REQUEST["http body"]:::actor
+
+  subgraph parser["runtime parser"]
+    SCAN["field scanner"]:::work
+    FIELDS["minimal scoring fields"]:::work
   end
 
-  subgraph ARTIFACT["runtime artifact"]
-    MODEL["src/tree_model.rs with checksum"]:::data
-    BINARY["Rust binary"]:::core
-    IMAGE["Docker image"]:::core
+  subgraph rules["deterministic fast-path"]
+    SAFE{"obviously safe?"}:::work
+    RISKY{"obviously risky?"}:::work
   end
 
-  DATA -->|"load entries"| FEATURES
-  FEATURES -->|"14 request features"| TRAINER
-  TRAINER -->|"validate locally"| CHECK
-  CHECK -->|"yes"| MODEL
-  CHECK -->|"no"| STOP(["stop generation"]):::enderr
-  MODEL -->|"compile constants"| BINARY
-  BINARY -->|"copy binary only"| IMAGE
-  IMAGE -->|"training data excluded"| READY(["runtime ready"]):::endok
+  subgraph residual["residual tree"]
+    FEATURES["fixed feature vector"]:::data
+    MODEL["packed tree data"]:::data
+    WALK["small indexed predictor"]:::work
+  end
 
-  classDef core fill:#ececec,color:#111111,stroke:#8f8f8f,stroke-width:1px
-  classDef work fill:#dfe9ff,color:#13315c,stroke:#5b7bbf,stroke-width:1px
-  classDef data fill:#dff3e3,color:#0f4d23,stroke:#5da776,stroke-width:1px
-  classDef endok fill:#c8f2d2,color:#0f4d23,stroke:#3f8f5b,stroke-width:1px
-  classDef enderr fill:#ffd9d9,color:#5e1717,stroke:#b65b5b,stroke-width:1px
+  APPROVE(["approve"]):::endok
+  DENY(["deny"]):::enderr
+
+  REQUEST --> SCAN
+  SCAN --> FIELDS
+  FIELDS --> SAFE
+  SAFE -->|"yes"| APPROVE
+  SAFE -->|"no"| RISKY
+  RISKY -->|"yes"| DENY
+  RISKY -->|"no"| FEATURES
+  FEATURES --> MODEL
+  MODEL --> WALK
+  WALK -->|"legit leaf"| APPROVE
+  WALK -->|"fraud leaf"| DENY
+
+  classDef actor fill:black,color:white,stroke:black
+  classDef work fill:lightsteelblue,color:midnightblue,stroke:steelblue
+  classDef data fill:honeydew,color:darkgreen,stroke:seagreen
+  classDef endok fill:palegreen,color:darkgreen,stroke:seagreen
+  classDef enderr fill:mistyrose,color:maroon,stroke:indianred
 ```
 
-### architecture
+## model generation
 
-The compose topology is still the required **1 load balancer + 2 API containers**. The extra fan-out happens inside the LB container: `fd-lb` forks 4 lightweight worker processes that share the same TCP listener and distribute accepted client file descriptors between `api1` and `api2`.
+The model is generated offline and committed as Rust source. Generation applies the same deterministic fast-path used at runtime, trains only on the remaining requests, validates exact classification on the training payload, and emits packed nodes for the runtime predictor.
 
-| stage | hot-path work | key calls |
-| --- | --- | --- |
-| client to LB | The single LB container accepts TCP on `:9999`. | `accept4` |
-| LB worker fan-out | 4 LB worker processes share the listener and choose `api1` or `api2`. | `fork`, round-robin |
-| LB to API | The chosen worker passes the accepted client socket over a Unix control socket. | `sendmsg`, `SCM_RIGHTS` |
-| API containers | 2 API containers receive FDs and keep the client socket. | `recvmsg`, `epoll_wait` |
-| API parser | Read one HTTP message with a known-header fast-path, then scan only model fields. | `http_message_bounds_direct`, `parse_fast_fields` |
-| decision tree | Fill features lazily while walking generated thresholds. | `predict_with_lazy_features` |
-| response | Return one of two prebuilt HTTP responses. | `HTTP_SCORE0`, `HTTP_SCORE5` |
+The container does not need training data. It only ships the compiled scorer.
+
+## topology
+
+The load balancer accepts client connections and passes accepted sockets to API peers through Unix control sockets. After the handoff, the selected API process talks directly to the original client socket.
+
+The load balancer does not inspect requests and does not score fraud. Its job is only accepting sockets and distributing them cheaply.
 
 ```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif", "primaryColor": "#ffffff", "primaryTextColor": "#111111", "primaryBorderColor": "#111111", "lineColor": "#444444", "textColor": "#111111", "secondaryColor": "#f6f6f6", "tertiaryColor": "#f6f6f6", "clusterBkg": "#f6f6f6", "clusterBorder": "#cfcfcf"}}}%%
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "ui-sans-serif, system-ui, sans-serif"}}}%%
 flowchart TB
-  CLIENT["HTTP client"]:::actor
+  CLIENT["http client"]:::actor
 
-  subgraph LB["lb container"]
-    direction TB
-    LISTENER["shared TCP listener :9999"]:::edge
-
-    subgraph WORKERS["4 fd-lb worker processes"]
-      direction LR
-      W1["worker 1"]:::core
-      W2["worker 2"]:::core
-      W3["worker 3"]:::core
-      W4["worker 4"]:::core
-    end
-
-    PICK["round-robin target: api1 / api2"]:::work
+  subgraph lb["load balancer container"]
+    LISTENER["tcp listener"]:::edge
+    WORKER["fd handoff worker"]:::core
+    PICK["round-robin socket picker"]:::work
   end
 
-  subgraph SOCKETS["Unix control sockets"]
+  subgraph controls["unix control sockets"]
     direction LR
-    S1["/sockets/api1.sock"]:::edge
-    S2["/sockets/api2.sock"]:::edge
+    PRIMARY_SOCKET["primary api socket"]:::edge
+    SECONDARY_SOCKET["secondary api socket"]:::edge
   end
 
-  subgraph APIS["2 API containers"]
+  subgraph apis["api containers"]
     direction LR
-    API1["api1 Rust epoll loop"]:::core
-    API2["api2 Rust epoll loop"]:::core
+    PRIMARY_API["primary epoll loop"]:::core
+    SECONDARY_API["secondary epoll loop"]:::core
   end
 
-  subgraph HOT["per-request hot path"]
-    direction TB
-    PARSE["HTTP header fast-path + body scanner"]:::work
-    TREE["packed tree + lazy feature fill"]:::data
-    APPROVE(["approve score 0"]):::endok
-    DENY(["deny score 5"]):::enderr
-    READY(["ready ok"]):::endok
-    MISS(["404 / parse miss fallback"]):::enderr
+  subgraph hotpath["request hot path"]
+    PARSE["header fast-path and body scanner"]:::work
+    FAST["safe or risky fast-path"]:::work
+    TREE["residual tree scorer"]:::data
+    RESPONSE(["prebuilt response"]):::endok
+    FALLBACK(["fallback response"]):::enderr
   end
 
-  CLIENT -->|"HTTP request"| LISTENER
-  LISTENER -->|"accept4"| W1
-  LISTENER -->|"accept4"| W2
-  LISTENER -->|"accept4"| W3
-  LISTENER -->|"accept4"| W4
-  W1 -->|"client fd"| PICK
-  W2 -->|"client fd"| PICK
-  W3 -->|"client fd"| PICK
-  W4 -->|"client fd"| PICK
-  PICK -->|"SCM_RIGHTS"| S1
-  PICK -->|"SCM_RIGHTS"| S2
-  S1 -->|"recvmsg fd"| API1
-  S2 -->|"recvmsg fd"| API2
-  API1 -->|"same client socket"| PARSE
-  API2 -->|"same client socket"| PARSE
-  PARSE -->|"GET /ready"| READY
-  PARSE -->|"POST /fraud-score"| TREE
-  PARSE -->|"other route / invalid body"| MISS
-  TREE -->|"legit leaf"| APPROVE
-  TREE -->|"fraud leaf"| DENY
+  CLIENT -->|"request"| LISTENER
+  LISTENER -->|"accept"| WORKER
+  WORKER --> PICK
+  PICK -->|"fd handoff"| PRIMARY_SOCKET
+  PICK -->|"fd handoff"| SECONDARY_SOCKET
+  PRIMARY_SOCKET -->|"receive fd"| PRIMARY_API
+  SECONDARY_SOCKET -->|"receive fd"| SECONDARY_API
+  PRIMARY_API -->|"original socket"| PARSE
+  SECONDARY_API -->|"original socket"| PARSE
+  PARSE -->|"health check"| RESPONSE
+  PARSE -->|"score request"| FAST
+  PARSE -->|"invalid request"| FALLBACK
+  FAST -->|"resolved"| RESPONSE
+  FAST -->|"ambiguous"| TREE
+  TREE --> RESPONSE
 
-  classDef actor fill:#111111,color:#ffffff,stroke:#111111,stroke-width:1px
-  classDef edge fill:#ffffff,color:#111111,stroke:#111111,stroke-width:1px
-  classDef core fill:#ececec,color:#111111,stroke:#8f8f8f,stroke-width:1px
-  classDef work fill:#dfe9ff,color:#13315c,stroke:#5b7bbf,stroke-width:1px
-  classDef data fill:#dff3e3,color:#0f4d23,stroke:#5da776,stroke-width:1px
-  classDef endok fill:#c8f2d2,color:#0f4d23,stroke:#3f8f5b,stroke-width:1px
-  classDef enderr fill:#ffd9d9,color:#5e1717,stroke:#b65b5b,stroke-width:1px
+  classDef actor fill:black,color:white,stroke:black
+  classDef edge fill:white,color:black,stroke:black
+  classDef core fill:gainsboro,color:black,stroke:gray
+  classDef work fill:lightsteelblue,color:midnightblue,stroke:steelblue
+  classDef data fill:honeydew,color:darkgreen,stroke:seagreen
+  classDef endok fill:palegreen,color:darkgreen,stroke:seagreen
+  classDef enderr fill:mistyrose,color:maroon,stroke:indianred
 ```
 
-The load balancer does not inspect requests and does not score fraud. Its only job is accepting client sockets and distributing those already-accepted file descriptors between the two API containers. After the transfer, the chosen API talks directly to the original client socket.
+## runtime tuning
 
-### configuration
+The compose defaults favor a little more budget for the socket handoff path and keep the load balancer simple. Extra load balancer workers, datagram handoff, and memory locking were tried locally and did not stay in the default configuration.
 
-The compose defaults are tuned for the final 2 API + 1 LB topology:
-
-| variable | default | purpose |
-| --- | ---: | --- |
-| `LB_MODE` | `fd` | final load balancer mode |
-| `LB_WORKERS` | `4` | worker processes inside the single LB container |
-| `FD_SOCKET_DIR` | `/sockets` | API control socket directory |
-| `API_EPOLL` | `1` | epoll request loop |
-| `API_WORKERS` | `192` | preallocated API worker capacity |
-| `MLOCK_CURRENT` | `0` | optional memory locking |
+The remaining optimization target is mostly transport tail behavior rather than scoring logic.

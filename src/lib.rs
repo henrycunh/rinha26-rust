@@ -1,2 +1,2 @@
-pub mod fast_tree;
-pub mod tree_model;
+pub mod fraud_scoring;
+pub mod residual_tree;

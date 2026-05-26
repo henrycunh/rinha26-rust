@@ -36,7 +36,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.45}"
+          cpus: "${API_CPUS:-0.40}"
           memory: "${API_MEMORY:-160MB}"
 
   api2:
@@ -51,7 +51,7 @@ services:
     hostname: lb
     environment:
       PORT: "9999"
-      LB_FD_SOCKETS: "${LB_FD_SOCKETS:-/sockets/api1.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api2.sock}"
+      LB_FD_SOCKETS: "${LB_FD_SOCKETS:-/sockets/api1.sock,/sockets/api2.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api1.sock,/sockets/api2.sock,/sockets/api1.sock,/sockets/api2.sock}"
       MLOCK_CURRENT: "${MLOCK_CURRENT:-0}"
       TCP_BACKLOG: "${TCP_BACKLOG:-8192}"
       TCP_QUICKACK: "${TCP_QUICKACK:-1}"
@@ -79,7 +79,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${LB_CPUS:-0.10}"
+          cpus: "${LB_CPUS:-0.20}"
           memory: "${LB_MEMORY:-30MB}"
 
 volumes:

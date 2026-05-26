@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use rinha_fraud::fast_tree::score_fast_tree_body;
+use rinha_fraud::fraud_scoring::score_fraud_body;
 
 const DEFAULT_API_WORKERS: usize = 192;
 #[cfg(target_os = "linux")]
@@ -1268,7 +1268,7 @@ fn handle_connection(stream: TcpStream) {
 }
 
 fn score_request(body: &[u8]) -> u8 {
-    score_fast_tree_body(body).unwrap_or(0)
+    score_fraud_body(body).unwrap_or(0)
 }
 
 fn fd_socket_path_from_env() -> Option<String> {
