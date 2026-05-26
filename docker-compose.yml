@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: ghcr.io/henrycunh/rinha26-rust:e664025
+    image: ghcr.io/henrycunh/rinha26-rust:5819e30
     platform: linux/amd64
     hostname: api1
     network_mode: "none"
@@ -42,7 +42,7 @@ services:
     cpuset: "1"
 
   lb:
-    image: ghcr.io/henrycunh/rinha26-rust:e664025
+    image: ghcr.io/henrycunh/rinha26-rust:5819e30
     platform: linux/amd64
     entrypoint: ["/app/fd-lb"]
     hostname: lb
@@ -52,6 +52,7 @@ services:
       MLOCK_CURRENT: "0"
       TCP_BACKLOG: "8192"
       TCP_QUICKACK: "1"
+      LB_WORKERS: "4"
     ports:
       - "9999:9999"
     volumes:
